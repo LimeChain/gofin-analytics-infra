@@ -1,0 +1,6 @@
+terraform {
+  backend "gcs" {
+    bucket = "gofin-analytics-511817-bootstrap-tfstate"
+    prefix = "bootstrap"
+  }
+}

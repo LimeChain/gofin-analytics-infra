@@ -1,0 +1,37 @@
+{
+	admin off
+	auto_https off
+	persist_config off
+	grace_period 5s
+	log default {
+		exclude http.log.access http.log.error
+	}
+}
+
+:{$PORT:8080} {
+	respond /healthz "ok" 200
+
+	reverse_proxy {$POSTHOG_UPSTREAM:https://eu.i.posthog.com} {
+		header_up Host {upstream_hostport}
+		header_up -Forwarded
+		header_up -X-Forwarded-For
+		header_up -X-Forwarded-Host
+		header_up -X-Forwarded-Proto
+		header_up -X-Real-IP
+		header_up -X-Client-IP
+		header_up -CF-Connecting-IP
+		header_up -True-Client-IP
+		header_up -Cookie
+		header_up -Authorization
+		header_up -X-Cloud-Trace-Context
+		header_up -Traceparent
+		header_up -Tracestate
+		header_up -Baggage
+		header_up User-Agent gofin-analytics-proxy
+
+		transport http {
+			dial_timeout 3s
+			response_header_timeout 5s
+		}
+	}
+}

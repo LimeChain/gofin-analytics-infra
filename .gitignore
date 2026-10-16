@@ -1,0 +1,8 @@
+**/.terraform/
+*.tfstate*
+*.tfplan
+crash.log
+gha-creds-*.json
+.context/
+__pycache__/
+bootstrap/backend.tf

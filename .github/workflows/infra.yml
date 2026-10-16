@@ -1,0 +1,127 @@
+name: Proxy infrastructure
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      image_digest:
+        description: "Optional existing sha256 digest for rollback (otherwise build this commit)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: proxy-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'production' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PROJECT_ID: gofin-analytics-511817
+  REGION: europe-west1
+  IMAGE_REPOSITORY: europe-west1-docker.pkg.dev/gofin-analytics-511817/analytics/proxy
+  WIF_PROVIDER: projects/722904627079/locations/global/workloadIdentityPools/gofin-github/providers/github
+  TF_IN_AUTOMATION: "true"
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: 1.15.1
+          terraform_wrapper: false
+      - run: make validate
+      - run: make test
+
+  plan:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: analytics-plan@gofin-analytics-511817.iam.gserviceaccount.com
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: 1.15.1
+          terraform_wrapper: false
+      - run: terraform -chdir=infra init -input=false -lockfile=readonly
+      - name: Plan infrastructure against the currently deployed image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="$(terraform -chdir=infra output -raw deployed_image)"
+          terraform -chdir=infra plan -input=false -lock=false -no-color -var="image=$image"
+          echo 'The plan uses the deployed image. Container changes are tested above and receive a new digest after merge.' >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: analytics-deploy@gofin-analytics-511817.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: 1.15.1
+          terraform_wrapper: false
+      - name: Build and push, or select an existing rollback image
+        id: image
+        env:
+          ROLLBACK_DIGEST: ${{ inputs.image_digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "$ROLLBACK_DIGEST" ]]; then
+            [[ "$ROLLBACK_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo 'Invalid image digest'; exit 1; }
+            image="$IMAGE_REPOSITORY@$ROLLBACK_DIGEST"
+            gcloud artifacts docker images describe "$image" --project="$PROJECT_ID" >/dev/null
+          else
+            gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
+            tag="$IMAGE_REPOSITORY:$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+            docker build --platform linux/amd64 --tag "$tag" proxy
+            PROXY_IMAGE="$tag" python3 scripts/test_proxy.py
+            docker push "$tag"
+            digest="$(gcloud artifacts docker images describe "$tag" --project="$PROJECT_ID" --format='value(image_summary.digest)')"
+            [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+            image="$IMAGE_REPOSITORY@$digest"
+          fi
+          echo "ref=$image" >> "$GITHUB_OUTPUT"
+      - run: terraform -chdir=infra init -input=false -lockfile=readonly
+      - name: Plan and apply
+        env:
+          TF_VAR_image: ${{ steps.image.outputs.ref }}
+        run: |
+          terraform -chdir=infra plan -input=false -lock-timeout=5m -out=deploy.tfplan
+          terraform -chdir=infra apply -input=false deploy.tfplan
+      - name: Verify public health and publish deployment details
+        shell: bash
+        run: |
+          set -euo pipefail
+          url="$(terraform -chdir=infra output -raw service_url)"
+          curl --fail --silent --show-error --max-time 30 --retry 3 "$url/healthz"
+          {
+            echo "Proxy: $url"
+            echo "Image: $(terraform -chdir=infra output -raw deployed_image)"
+          } >> "$GITHUB_STEP_SUMMARY"
