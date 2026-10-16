@@ -71,7 +71,7 @@ resource "google_cloud_run_v2_service" "proxy" {
         period_seconds        = 3
         failure_threshold     = 10
         http_get {
-          path = "/healthz"
+          path = "/health"
           port = 8080
         }
       }
