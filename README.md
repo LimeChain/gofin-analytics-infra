@@ -9,6 +9,7 @@ GitHub Actions tests changes, plans pull requests and deploys `main` with Terraf
 | Cloud Run region | `europe-west1` (Belgium) |
 | Upstream | `https://eu.i.posthog.com` |
 | Service | `gofin-analytics-proxy` |
+| Endpoint | `https://gofin-analytics-proxy-fj4qllww7q-ew.a.run.app` |
 | Capacity | Request-based billing, 1 vCPU, 512 MiB, 0–3 instances, concurrency 80 |
 | Authentication | Public ingestion; GitHub deployments use Workload Identity Federation |
 | State | Separate private, versioned GCS buckets for bootstrap and proxy |
@@ -19,7 +20,9 @@ The CLI sends PostHog's native capture payload, including its public project tok
 to the proxy URL using the same API path (for example `/i/v0/e/`). The proxy does
 not store a PostHog token, parse events, validate their schema, transform payloads,
 queue data, or retry failed requests. It preserves upstream response status/body.
-`/healthz` is a local readiness endpoint and does not contact PostHog.
+`/health` is a local readiness endpoint and does not contact PostHog. Avoid
+`/healthz`: Google's public frontend intercepts that path even though an internal
+Cloud Run startup probe can reach it.
 
 Caddy removes conventional client-IP forwarding headers, cookies, authorization
 and tracing headers, and uses a fixed upstream User-Agent. It suppresses access

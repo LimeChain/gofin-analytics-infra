@@ -60,7 +60,7 @@ def main():
         origin = f"http://127.0.0.1:{port}"
         for _ in range(100):
             try:
-                with urllib.request.urlopen(origin + "/healthz", timeout=1) as response:
+                with urllib.request.urlopen(origin + "/health", timeout=1) as response:
                     assert response.status == 200 and response.read() == b"ok"
                 break
             except (urllib.error.URLError, http.client.RemoteDisconnected):
