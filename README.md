@@ -114,3 +114,87 @@ project token. A successful capture response proves ingestion acceptance, not
 that an event is already queryable in PostHog. Verify persistence in PostHog separately.
 CLI instrumentation and `gofin analytics enable|disable|status` belong in the GoFin
 CLI repository and are not implemented by this infrastructure repository.
+
+## Provider functions
+
+Three public Cloud Functions v2 forward a small allowlist of GoFin provider API
+requests to Uniswap, Relay and Across. They share `function/` and its `Proxy`
+entry point; `PROXY_CONFIG` selects the upstream, allowed methods and paths, and
+credential file paths for each function. Each request path is appended to the
+configured upstream base path: for example, Uniswap's `/quote` reaches its
+upstream `/v1/quote`. `/health` is local and does not check the provider or its
+credentials. Other paths are rejected. The provider API retains its own request
+and response semantics. The current methods and paths are listed in
+[`functions-infra/main.tf`](functions-infra/main.tf). Relay's `/requests/v3`
+is intentionally excluded because it exposes broad app history. GoFin's Solana
+recovery is not yet compatible with this restricted Relay proxy.
+
+The functions use the Cloud Functions `go126` runtime. Go is used here because
+Rust is not an officially supported Cloud Functions runtime. The endpoints do
+not authenticate clients: anyone who knows a URL can consume the shared provider
+quota, and capacity limits are not a hard cost or quota cap. Avoid sending secrets
+or private account data in URLs. Use only the routes needed by GoFin.
+
+`functions-infra/` has its own GCS state and manages the functions independently
+of the analytics proxy in `infra/`. Bootstrap creates the required service
+accounts, IAM, APIs, secret resources and state bucket; an administrator must
+plan and apply bootstrap changes before the functions deployment. Follow the
+existing bootstrap state migration instructions above and never start a second
+bootstrap state. For the first manual functions deployment, serialize creation so
+the functions do not race to initialize Google's shared regional staging bucket:
+
+```sh
+terraform -chdir=functions-infra init -input=false -lockfile=readonly
+terraform -chdir=functions-infra plan -input=false -out=deploy.tfplan
+terraform -chdir=functions-infra apply -input=false -parallelism=1 deploy.tfplan
+```
+
+The normal CI plan account has read-only access, and the deploy
+account applies functions changes on `main`. PRs from forks run offline checks
+only. The **Provider functions** workflow tests Go and validates Terraform, plans
+same-repository PRs, and deploys the functions stack on `main` changes to the
+function or its infrastructure. It checks `/health` and an unknown route without
+calling upstreams or submitting trades. The separate analytics workflow remains
+responsible for the analytics stack.
+Its automatic deployment runs only when analytics source or infrastructure
+changes; workflow-only changes can be deployed explicitly with its manual run.
+
+```sh
+make functions-test
+make functions-validate
+```
+
+Terraform and CI contain secret resource references only, never provider key
+values. The runtime reads mounted Secret Manager `latest` versions on each
+request, so rotation does not require redeployment. An empty or `UNCONFIGURED`
+credential returns HTTP 503 before forwarding. Provision the following secret
+versions through an administrator's secure local environment:
+
+| Secret Manager ID | Purpose |
+| --- | --- |
+| `provider-uniswap-api-key` | Uniswap API key |
+| `provider-relay-api-key` | Relay API key |
+| `provider-across-api-key` | Across API key |
+| `provider-across-integrator-id` | Across integrator ID (public attribution) |
+
+The Across integrator ID is public onchain attribution, not a confidential API
+credential. Secret Manager stores it so operators can update the configuration
+through the same rotation mechanism; provider responses may legitimately include it.
+
+For example, replace a placeholder or rotate a value using a protected local file
+(or a secure program that writes the value to standard output):
+
+```sh
+gcloud secrets versions add provider-uniswap-api-key \
+  --project=gofin-analytics-511817 --data-file=- < /path/to/protected-secret-file
+```
+
+Use the corresponding secret ID for the other providers. Do not put values in
+shell arguments, source files, Terraform variables or state, CI logs, or chat.
+Confirm IAM and secret version availability if requests still return 503; the
+health check alone cannot establish provider readiness. Secret Manager's mounted
+`latest` version may take time to refresh. For an initial placeholder check,
+call an allowed read-only route only while its secret is known to be unconfigured
+and verify HTTP 503 without printing the response body; never assume a production
+secret is still a placeholder. Provider acceptance does not establish trade
+execution or settlement.

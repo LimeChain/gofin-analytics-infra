@@ -2,8 +2,19 @@ name: Proxy infrastructure
 
 on:
   pull_request:
+    paths:
+      - 'proxy/**'
+      - 'infra/**'
+      - 'bootstrap/**'
+      - 'scripts/test_proxy.py'
+      - 'Makefile'
+      - '.github/workflows/infra.yml'
   push:
     branches: [main]
+    paths:
+      - 'proxy/**'
+      - 'infra/**'
+      - 'scripts/test_proxy.py'
   workflow_dispatch:
     inputs:
       image_digest:

@@ -1,0 +1,102 @@
+name: Provider functions
+
+on:
+  pull_request:
+    paths:
+      - 'function/**'
+      - 'functions-infra/**'
+      - 'Makefile'
+      - '.github/workflows/functions.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'function/**'
+      - 'functions-infra/**'
+      - 'Makefile'
+      - '.github/workflows/functions.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: functions-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'production' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  WIF_PROVIDER: projects/722904627079/locations/global/workloadIdentityPools/gofin-github/providers/github
+  TF_IN_AUTOMATION: "true"
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: function/go.mod
+          cache-dependency-path: function/go.sum
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.15.1
+          terraform_wrapper: false
+      - run: make functions-test
+      - run: make functions-validate
+
+  plan:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: analytics-plan@gofin-analytics-511817.iam.gserviceaccount.com
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.15.1
+          terraform_wrapper: false
+      - run: terraform -chdir=functions-infra init -input=false -lockfile=readonly
+      - run: terraform -chdir=functions-infra plan -input=false -lock=false -no-color
+
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: analytics-deploy@gofin-analytics-511817.iam.gserviceaccount.com
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.15.1
+          terraform_wrapper: false
+      - run: terraform -chdir=functions-infra init -input=false -lockfile=readonly
+      - name: Plan and apply
+        run: |
+          terraform -chdir=functions-infra plan -input=false -lock-timeout=5m -out=deploy.tfplan
+          # Serial creation avoids racing the shared regional functions staging bucket on first deployment.
+          terraform -chdir=functions-infra apply -input=false -parallelism=1 deploy.tfplan
+      - name: Check public endpoints
+        shell: bash
+        run: |
+          set -euo pipefail
+          urls="$(terraform -chdir=functions-infra output -json service_urls | jq -er 'if length == 3 then .[] else error("Expected three service URLs") end')"
+          while IFS= read -r url; do
+            curl --fail --silent --show-error --max-time 30 --retry 3 "$url/health" >/dev/null
+            status="$(curl --silent --show-error --max-time 30 -o /dev/null -w '%{http_code}' "$url/__gofin_unknown_route__")"
+            [[ "$status" == 404 ]] || { echo "Unknown-route check failed: HTTP $status"; exit 1; }
+          done <<< "$urls"
+          echo 'Provider function health and unknown-route checks passed.' >> "$GITHUB_STEP_SUMMARY"
