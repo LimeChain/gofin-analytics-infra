@@ -8,8 +8,8 @@ locals {
       credential_prefix = ""
       forward_headers   = ["X-Universal-Router-Version", "X-Permit2-Disabled", "X-Erc20eth-Enabled", "X-Universal-Router-Swapsteps", "X-Api-Experimental"]
       routes = concat(
-        [for path in ["/check_approval", "/quote", "/swap"] : { method = "POST", path = path }],
-        [{ method = "GET", path = "/swaps" }],
+        [for path in ["/check_approval", "/quote", "/swap", "/order"] : { method = "POST", path = path }],
+        [for path in ["/swaps", "/orders"] : { method = "GET", path = path }],
       )
       query_injections = {}
     }

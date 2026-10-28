@@ -238,3 +238,59 @@ func TestConfiguredForwardHeadersAndUnsafeNames(t *testing.T) {
 		}
 	}
 }
+
+// Signed orders must be forwarded exactly once; status reads must retain the
+// precise order identity so a caller can reconcile an uncertain submission.
+func TestUniswapXSubmissionAndRecovery(t *testing.T) {
+	const orderID = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const body = `{"routing":"DUTCH_V3","quote":{"orderId":"` + orderID + `"},"signature":"synthetic-signature"}`
+	var posts, reads int
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Api-Key") != "secret-key" || r.Header.Get("Authorization") != "" {
+			t.Error("credential isolation failed")
+		}
+		switch r.Method + " " + r.URL.Path {
+		case "POST /v1/order":
+			posts++
+			b, _ := io.ReadAll(r.Body)
+			if string(b) != body {
+				t.Errorf("signed body changed: %q", b)
+			}
+			// The upstream may accept an order before its response fails.
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":"temporary"}`))
+		case "GET /v1/orders":
+			reads++
+			if r.URL.Query().Get("orderId") != orderID {
+				t.Error("order identity changed")
+			}
+			_, _ = w.Write([]byte(`{"orders":[{"orderId":"` + orderID + `","orderStatus":"open"}]}`))
+		default:
+			t.Errorf("unexpected upstream request: %s %s", r.Method, r.URL)
+		}
+	}))
+	defer server.Close()
+	old := client
+	client = server.Client()
+	t.Cleanup(func() { client = old })
+	key, _ := setup(t, server.URL)
+	b, err := json.Marshal(config{Upstream: server.URL + "/v1", CredentialHeader: "X-Api-Key", CredentialFile: key, Routes: []route{{"POST", "/order"}, {"GET", "/orders"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PROXY_CONFIG", string(b))
+	if w := invoke("POST", "/order", body); w.Code != 503 || w.Body.String() != `{"error":"temporary"}` || posts != 1 {
+		t.Fatalf("submission: status %d, posts %d, body %s", w.Code, posts, w.Body)
+	}
+	if w := invoke("GET", "/orders?orderId="+orderID, ""); w.Code != 200 || !strings.Contains(w.Body.String(), `"orderStatus":"open"`) || reads != 1 {
+		t.Fatalf("recovery: status %d, reads %d", w.Code, reads)
+	}
+	for _, tc := range []struct{ method, path string }{{"GET", "/order"}, {"POST", "/orders"}, {"DELETE", "/order"}, {"POST", "/cancel"}} {
+		if w := invoke(tc.method, tc.path, body); w.Code != 404 {
+			t.Errorf("unexpected allowed route %s %s: %d", tc.method, tc.path, w.Code)
+		}
+	}
+	if posts != 1 || reads != 1 {
+		t.Fatalf("unexpected forwarding or retry: posts %d, reads %d", posts, reads)
+	}
+}

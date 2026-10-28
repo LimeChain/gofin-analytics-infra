@@ -129,6 +129,13 @@ and response semantics. The current methods and paths are listed in
 is intentionally excluded because it exposes broad app history. GoFin's Solana
 recovery is not yet compatible with this restricted Relay proxy.
 
+Uniswap supports both AMM swaps and UniswapX: `POST /order` forwards a signed
+order, and `GET /orders?orderId=...` retrieves its status. The proxy preserves
+the body and provider response, injects the server-held API key, and never
+retries a submission. Clients must persist the order identity before submitting
+and reconcile uncertain responses through `/orders`; an accepted or open order
+is not settled. No separate cancellation endpoint is added.
+
 The functions use the Cloud Functions `go126` runtime. Go is used here because
 Rust is not an officially supported Cloud Functions runtime. The endpoints do
 not authenticate clients: anyone who knows a URL can consume the shared provider
